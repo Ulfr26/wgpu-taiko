@@ -1,5 +1,21 @@
-use wgpu::{Device, Queue, Surface, SurfaceConfiguration, Instance, InstanceDescriptor, Color, CommandEncoderDescriptor, RenderPassDescriptor, RenderPassColorAttachment, SurfaceError};
-use winit::{dpi::PhysicalSize, window::{Window, WindowBuilder}, event::{WindowEvent, Event, KeyboardInput, ElementState, VirtualKeyCode}, event_loop::EventLoop};
+use wgpu::{
+    BlendState, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, Face,
+    FragmentState, FrontFace, Instance, InstanceDescriptor, MultisampleState,
+    PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, Queue,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
+    ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError, VertexState,
+};
+use winit::{
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
+    event_loop::EventLoop,
+    window::{Window, WindowBuilder},
+};
+
+use std::f64::consts::PI;
+use util::color_from_hsva;
+
+pub mod util;
 
 const CLEAR_COLOUR: Color = Color {
     r: 0.1,
@@ -15,15 +31,21 @@ struct State {
     config: SurfaceConfiguration,
     size: PhysicalSize<u32>,
     window: Window,
+    render_pipeline: RenderPipeline,
+    clear_colour: Color,
+    changing_clear_colour: bool,
+    cursor_position: Option<PhysicalPosition<f64>>,
 }
 
-pub async fn run() {
-    // Start the error logger as winit uses this extensively
-    env_logger::init();
+const WIDTH: u32 = 800;
+const HEIGHT: u32 = 600;
 
+pub async fn run() {
     // To build a window with winit, we need to build an event loop first
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
+        .with_title("太鼓の達人")
+        .with_inner_size(PhysicalSize::new(WIDTH, HEIGHT))
         .build(&event_loop)
         .expect("Couldn't build the window");
 
@@ -33,30 +55,32 @@ pub async fn run() {
         Event::WindowEvent {
             window_id,
             ref event,
-        } if window_id == state.window().id() => if !state.input(event) {
-            match event {
-                // Closing the window
-                WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput {
-                    input:
-                        KeyboardInput {
-                            state: ElementState::Pressed,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
-                            ..
-                        },
-                    ..
-                } => control_flow.set_exit(),
+        } if window_id == state.window().id() => {
+            if !state.input(event) {
+                match event {
+                    // Closing the window
+                    WindowEvent::CloseRequested
+                    | WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state: ElementState::Pressed,
+                                virtual_keycode: Some(VirtualKeyCode::Escape),
+                                ..
+                            },
+                        ..
+                    } => control_flow.set_exit(),
 
-                // Resizing the window
-                WindowEvent::Resized(physical_size) => {
-                    state.resize(*physical_size);
-                },
+                    // Resizing the window
+                    WindowEvent::Resized(physical_size) => {
+                        state.resize(*physical_size);
+                    }
 
-                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                    state.resize(**new_inner_size);
-                },
+                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                        state.resize(**new_inner_size);
+                    }
 
-                _ => {}
+                    _ => {}
+                }
             }
         }
 
@@ -64,16 +88,14 @@ pub async fn run() {
             state.update();
 
             match state.render() {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(SurfaceError::Lost) => state.resize(state.size),
                 Err(SurfaceError::OutOfMemory) => control_flow.set_exit(),
                 Err(e) => eprintln!("{e:?}"),
             }
         }
 
-        Event::MainEventsCleared => {
-            state.window().request_redraw()
-        }
+        Event::MainEventsCleared => state.window().request_redraw(),
 
         _ => {}
     });
@@ -82,7 +104,7 @@ pub async fn run() {
 impl State {
     async fn new(window: Window) -> Self {
         let size = window.inner_size();
-        
+
         // The instance is a handle to our GPU
         // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
         let instance = Instance::new(InstanceDescriptor {
@@ -95,32 +117,34 @@ impl State {
         // The surface needs to live as long as the window that
         // created it. State owns the window so this should
         // be safe.
-        let surface = unsafe {
-            instance.create_surface(&window)
-        }.unwrap();
+        let surface = unsafe { instance.create_surface(&window) }.unwrap();
 
-        let adapter = instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: Default::default(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
-            }
-        ).await.unwrap();
+            })
+            .await
+            .unwrap();
 
         // Just curious
-        println!("{:?}", adapter.get_info().backend);
+        let backend = adapter.get_info().backend;
+        dbg!(backend);
 
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
-                // If we were targeting wasm32 we would use
-                // wgpu::Limits::downlevel_webgl12_defaults()
-                limits: Default::default(),
-                label: None,
-
-            },
-            None,
-        ).await.unwrap();
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    features: wgpu::Features::empty(),
+                    // If we were targeting wasm32 we would use
+                    // wgpu::Limits::downlevel_webgl12_defaults()
+                    limits: Default::default(),
+                    label: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
 
@@ -129,7 +153,9 @@ impl State {
         // colours coming out darker. If you want to support
         // non sRGB surfaces, you'll need to account for that
         // when drawing to the frame.
-        let surface_format = surface_caps.formats.iter()
+        let surface_format = surface_caps
+            .formats
+            .iter()
             .copied()
             .filter(|f| f.describe().srgb)
             .next()
@@ -150,13 +176,68 @@ impl State {
         };
         surface.configure(&device, &config);
 
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader1.wgsl").into()),
+        });
+
+        let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Render Pipeline Layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        let render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(ColorTargetState {
+                    format: config.format,
+                    blend: Some(BlendState::REPLACE),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: Some(Face::Back),
+                polygon_mode: PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+
+            depth_stencil: None,
+
+            multisample: MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+
+            multiview: None,
+        });
+
         Self {
             window,
             surface,
             device,
             queue,
             config,
-            size
+            size,
+            render_pipeline,
+            clear_colour: CLEAR_COLOUR,
+            changing_clear_colour: false,
+            cursor_position: None,
         }
     }
 
@@ -173,14 +254,44 @@ impl State {
         }
     }
 
-    fn input(&mut self, _event: &WindowEvent) -> bool {
-        // We don't have any events we want to capture,
-        // for now.
-        false
+    fn input(&mut self, event: &WindowEvent) -> bool {
+        match *event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = Some(position);
+                true
+            }
+
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        state: ElementState::Pressed,
+                        virtual_keycode: Some(VirtualKeyCode::Tab),
+                        ..
+                    },
+                ..
+            } => {
+                self.changing_clear_colour = !self.changing_clear_colour;
+                true
+            }
+
+            _ => false,
+        }
     }
 
     fn update(&mut self) {
-        // We don't have anything to update yet
+        // Not very efficient but I don't really mind
+        if self.changing_clear_colour {
+            if let Some(colour) = self.cursor_position.and_then(|position| {
+                color_from_hsva(
+                    2.0 * PI * position.x / self.size.width as f64,
+                    1.0,
+                    position.y / self.size.height as f64,
+                    1.0,
+                )
+            }) {
+                self.clear_colour = colour;
+            }
+        }
     }
 
     fn render(&mut self) -> Result<(), SurfaceError> {
@@ -188,25 +299,30 @@ impl State {
 
         let view = output.texture.create_view(&Default::default());
 
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { 
-            label: Some("Render Encoder"), 
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         // Create the render pass. We need to drop this afterwards
         // so that we can call encoder.finish(), as encoder
         // is borrowed mutably here.
-        let render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(CLEAR_COLOUR),
+                    load: wgpu::LoadOp::Clear(self.clear_colour),
                     store: true,
-                }
+                },
             })],
             depth_stencil_attachment: None,
         });
+
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.draw(0..3, 0..1);
 
         drop(render_pass);
 
