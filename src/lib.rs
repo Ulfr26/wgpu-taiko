@@ -4,7 +4,7 @@ use wgpu::{
     FragmentState, FrontFace, Instance, InstanceDescriptor, MultisampleState,
     PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, Queue,
     RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError, VertexState,
+    ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError, VertexState, Buffer, util::{DeviceExt, BufferInitDescriptor}, BufferUsages, BufferAddress, VertexStepMode, VertexAttribute, VertexBufferLayout, vertex_attr_array, IndexFormat,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -13,7 +13,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-use std::f64::consts::PI;
+use std::{f64::consts::PI, mem::size_of};
 use util::color_from_hsva;
 
 pub mod util;
@@ -33,11 +33,64 @@ struct State {
     size: PhysicalSize<u32>,
     window: Window,
     render_pipeline: RenderPipeline,
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+
+    num_indices: u32,
     clear_colour: Color,
     changing_clear_colour: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     diffuse_bind_group: wgpu::BindGroup,
 }
+
+// Struct that represents the vertices of objects in our scene
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    colour: [f32; 3],
+}
+
+impl Vertex {
+    const ATTRS: [VertexAttribute; 2] = vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        VertexBufferLayout {
+            array_stride: size_of::<Vertex>() as BufferAddress,
+            step_mode: VertexStepMode::Vertex,
+            /*
+            attributes: &[
+                VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: VertexFormat::Float32x3,
+                },
+
+                VertexAttribute {
+                    offset: size_of::<[f32; 3]>() as BufferAddress,
+                    shader_location: 1,
+                    format: VertexFormat::Float32x3,
+                }
+            ]
+            */
+            attributes: &Self::ATTRS,
+        }
+    }
+}
+
+const VERTICES: &[Vertex] = &[
+    Vertex { position: [-0.0868241, 0.49240386, 0.0], colour: [0.5, 0.0, 0.5] }, // A
+    Vertex { position: [-0.49513406, 0.06958647, 0.0], colour: [0.5, 0.0, 0.5] }, // B
+    Vertex { position: [-0.21918549, -0.44939706, 0.0], colour: [0.5, 0.0, 0.5] }, // C
+    Vertex { position: [0.35966998, -0.3473291, 0.0], colour: [0.5, 0.0, 0.5] }, // D
+    Vertex { position: [0.44147372, 0.2347359, 0.0], colour: [0.5, 0.0, 0.5] }, // E
+];
+
+const INDICES: &[u16] = &[
+    0, 1, 4,
+    1, 2, 4,
+    2, 3, 4
+];
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -293,7 +346,7 @@ impl State {
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader1.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader2.wgsl").into()),
         });
 
         let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -308,7 +361,7 @@ impl State {
             vertex: VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[Vertex::desc()],
             },
 
             fragment: Some(FragmentState {
@@ -342,6 +395,20 @@ impl State {
             multiview: None,
         });
 
+        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(
+            &BufferInitDescriptor { 
+                label: Some("Index Buffer"), 
+                contents: bytemuck::cast_slice(INDICES), 
+                usage: BufferUsages::INDEX,
+            }
+        );
+
         Self {
             window,
             surface,
@@ -351,6 +418,10 @@ impl State {
             size,
             render_pipeline,
             diffuse_bind_group,
+            vertex_buffer,
+            index_buffer,
+
+            num_indices: INDICES.len() as u32,
             clear_colour: CLEAR_COLOUR,
             changing_clear_colour: false,
             cursor_position: None,
@@ -438,7 +509,9 @@ impl State {
         });
 
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.draw(0..3, 0..1);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
 
         drop(render_pass);
 
