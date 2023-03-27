@@ -1,3 +1,7 @@
+use egui::FontDefinitions;
+use egui_demo_lib::DemoWindows;
+use egui_wgpu::renderer::ScreenDescriptor;
+use egui_winit_platform::{Platform, PlatformDescriptor};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     vertex_attr_array, BlendState, Buffer, BufferAddress, BufferUsages, Color, ColorTargetState,
@@ -6,7 +10,7 @@ use wgpu::{
     PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
     RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, Surface,
     SurfaceConfiguration, SurfaceError, VertexAttribute, VertexBufferLayout, VertexState,
-    VertexStepMode,
+    VertexStepMode, TextureFormat,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -15,7 +19,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-use std::{f64::consts::PI, mem::size_of};
+use std::{f64::consts::PI, mem::size_of, time::Instant};
 use util::color_from_hsva;
 
 pub mod texture;
@@ -51,6 +55,12 @@ struct State {
     freud_texture: texture::Texture,
     freud_bind_group: wgpu::BindGroup,
     freud: bool,
+
+    // Egui
+    egui_platform: Platform,
+    egui_app: DemoWindows,
+    egui_renderer: egui_wgpu::Renderer,
+    start_time: Instant,
 }
 
 // Struct that represents the vertices of objects in our scene
@@ -128,53 +138,56 @@ pub async fn run() {
 
     let mut state = State::new(window).await;
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent {
-            window_id,
-            ref event,
-        } if window_id == state.window().id() => {
-            if !state.input(event) {
-                match event {
-                    // Closing the window
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    } => control_flow.set_exit(),
+    event_loop.run(move |event, _, control_flow| {
+        state.egui_platform.handle_event(&event);
+        match event {
+            Event::WindowEvent {
+                window_id,
+                ref event,
+            } if window_id == state.window().id() => {
+                if !state.input(event) {
+                    match event {
+                        // Closing the window
+                        WindowEvent::CloseRequested
+                        | WindowEvent::KeyboardInput {
+                            input:
+                                KeyboardInput {
+                                    state: ElementState::Pressed,
+                                    virtual_keycode: Some(VirtualKeyCode::Escape),
+                                    ..
+                                },
+                            ..
+                        } => control_flow.set_exit(),
 
-                    // Resizing the window
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
+                        // Resizing the window
+                        WindowEvent::Resized(physical_size) => {
+                            state.resize(*physical_size);
+                        }
+
+                        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                            state.resize(**new_inner_size);
+                        }
+
+                        _ => {}
                     }
-
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        state.resize(**new_inner_size);
-                    }
-
-                    _ => {}
                 }
             }
-        }
 
-        Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-            state.update();
+            Event::RedrawRequested(window_id) if window_id == state.window().id() => {
+                state.update();
 
-            match state.render() {
-                Ok(_) => {}
-                Err(SurfaceError::Lost) => state.resize(state.size),
-                Err(SurfaceError::OutOfMemory) => control_flow.set_exit(),
-                Err(e) => log::error!("{e:?}"),
+                match state.render() {
+                    Ok(_) => {}
+                    Err(SurfaceError::Lost) => state.resize(state.size),
+                    Err(SurfaceError::OutOfMemory) => control_flow.set_exit(),
+                    Err(e) => log::error!("{e:?}"),
+                }
             }
+
+            Event::MainEventsCleared => state.window().request_redraw(),
+
+            _ => {}
         }
-
-        Event::MainEventsCleared => state.window().request_redraw(),
-
-        _ => {}
     });
 }
 
@@ -253,11 +266,11 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        let diffuse_bytes = include_bytes!("../assets/dababy.jpg");
+        let diffuse_bytes = include_bytes!("../assets/dababy-256.jpg");
         let diffuse_texture =
             texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "dababy").unwrap();
 
-        let freud_bytes = include_bytes!("../assets/sigmundfreud256.png");
+        let freud_bytes = include_bytes!("../assets/sigmundfreud3.png");
         let freud_texture =
             texture::Texture::from_bytes(&device, &queue, freud_bytes, "freud").unwrap();
 
@@ -381,6 +394,20 @@ impl State {
             usage: BufferUsages::INDEX,
         });
 
+        // Egui stuff
+        let platform = Platform::new(PlatformDescriptor {
+            physical_width: size.width,
+            physical_height: size.height,
+            scale_factor: window.scale_factor(),
+            font_definitions: FontDefinitions::default(),
+            style: egui::Style::default(),
+        });
+
+        let egui_renderer = egui_wgpu::Renderer::new(&device, TextureFormat::Bgra8UnormSrgb, None, 1);
+
+        let demo = egui_demo_lib::DemoWindows::default();
+        let start_time = Instant::now();
+
         Self {
             window,
             surface,
@@ -402,6 +429,11 @@ impl State {
             freud_texture,
             freud_bind_group,
             freud: false,
+
+            egui_platform: platform,
+            egui_app: demo,
+            egui_renderer,
+            start_time,
         }
     }
 
@@ -474,6 +506,35 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
+        let screen_descriptor = ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+
+        self.egui_platform.update_time(self.start_time.elapsed().as_secs_f64());
+        self.egui_platform.begin_frame();
+        self.egui_app.ui(&self.egui_platform.context());
+
+        let full_output = self.egui_platform.end_frame(Some(&self.window));
+        let paint_jobs = self.egui_platform.context().tessellate(full_output.shapes);
+        let textures_delta = full_output.textures_delta;
+
+        for texture in textures_delta.free.iter() {
+            self.egui_renderer.free_texture(texture);
+        }
+
+        for (id, image_delta) in textures_delta.set {
+            self.egui_renderer.update_texture(&self.device, &self.queue, id, &image_delta);
+        }
+
+        self.egui_renderer.update_buffers(
+            &self.device, 
+            &self.queue, 
+            &mut encoder, 
+            &paint_jobs, 
+            &screen_descriptor
+        );
+        
         // Create the render pass. We need to drop this afterwards
         // so that we can call encoder.finish(), as encoder
         // is borrowed mutably here.
@@ -501,6 +562,8 @@ impl State {
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
         render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+
+        self.egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
 
         drop(render_pass);
 
