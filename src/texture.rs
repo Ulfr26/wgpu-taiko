@@ -2,6 +2,7 @@ use anyhow::*;
 use image::GenericImageView;
 
 // TODO: Builder pattern?
+#[derive(Debug)]
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,

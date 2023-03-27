@@ -6,7 +6,7 @@ use wgpu::{
     PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
     RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, Surface,
     SurfaceConfiguration, SurfaceError, VertexAttribute, VertexBufferLayout, VertexState,
-    VertexStepMode,
+    VertexStepMode, BindGroupLayoutDescriptor, BindGroupDescriptor, BindGroup,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -17,9 +17,13 @@ use winit::{
 
 use std::{f64::consts::PI, mem::size_of};
 use util::color_from_hsva;
+use camera::Camera;
 
-pub mod texture;
-pub mod util;
+use crate::camera::CameraUniform;
+
+mod texture;
+mod util;
+mod camera;
 
 const CLEAR_COLOUR: Color = Color {
     r: 0.1,
@@ -38,8 +42,12 @@ struct State {
     render_pipeline: RenderPipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
-    diffuse_bind_group: wgpu::BindGroup,
+    diffuse_bind_group: BindGroup,
     diffuse_texture: texture::Texture,
+    camera: Camera,
+    camera_uniform: CameraUniform,
+    camera_buffer: Buffer,
+    camera_bind_group: BindGroup,
     num_indices: u32,
 
     // Surface challenge
@@ -318,6 +326,52 @@ impl State {
             label: Some("freud_bind_group"),
         });
 
+        let camera = Camera {
+            // We want to be 1 unit up and 2 back.
+            // +z is out of the screen
+            eye: (0.0, 1.0, 2.0).into(),
+            target: (0.0, 0.0, 0.0).into(),
+            up: cgmath::Vector3::unit_y(),
+            aspect: config.width as f32 / config.height as f32,
+            fovy: 45.0,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update_view_projection(&camera);
+
+        let camera_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("camera"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
+        let camera_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { 
+                        ty: wgpu::BufferBindingType::Uniform, 
+                        has_dynamic_offset: false, 
+                        min_binding_size: None, 
+                    },
+                    count: None,
+                }
+            ],
+            label: Some("camera_bind_group_layout"),
+        });
+
+        let camera_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("camera_bind_group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }]
+        });
+
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader3.wgsl").into()),
@@ -325,7 +379,7 @@ impl State {
 
         let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
+            bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -381,6 +435,8 @@ impl State {
             usage: BufferUsages::INDEX,
         });
 
+        
+
         Self {
             window,
             surface,
@@ -393,6 +449,10 @@ impl State {
             index_buffer,
             diffuse_bind_group,
             diffuse_texture,
+            camera,
+            camera_uniform,
+            camera_bind_group,
+            camera_buffer,
 
             num_indices: INDICES.len() as u32,
             clear_colour: CLEAR_COLOUR,
@@ -498,6 +558,7 @@ impl State {
         };
 
         render_pass.set_bind_group(0, bind_group, &[]);
+        render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
         render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
