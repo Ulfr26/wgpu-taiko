@@ -17,7 +17,7 @@ use winit::{
 
 use std::{f64::consts::PI, mem::size_of};
 use util::color_from_hsva;
-use camera::Camera;
+use camera::{Camera, CameraController};
 
 use crate::camera::CameraUniform;
 
@@ -32,6 +32,8 @@ const CLEAR_COLOUR: Color = Color {
     a: 1.0,
 };
 
+const CAMERA_SPEED: f32 = 0.2;
+
 struct State {
     surface: Surface,
     device: Device,
@@ -45,6 +47,7 @@ struct State {
     diffuse_bind_group: BindGroup,
     diffuse_texture: texture::Texture,
     camera: Camera,
+    camera_controller: CameraController,
     camera_uniform: CameraUniform,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
@@ -338,6 +341,8 @@ impl State {
             zfar: 100.0,
         };
 
+        let camera_controller = CameraController::new(CAMERA_SPEED);
+
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_projection(&camera);
 
@@ -374,7 +379,7 @@ impl State {
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader3.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader4.wgsl").into()),
         });
 
         let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -435,8 +440,6 @@ impl State {
             usage: BufferUsages::INDEX,
         });
 
-        
-
         Self {
             window,
             surface,
@@ -450,6 +453,7 @@ impl State {
             diffuse_bind_group,
             diffuse_texture,
             camera,
+            camera_controller,
             camera_uniform,
             camera_bind_group,
             camera_buffer,
@@ -479,7 +483,9 @@ impl State {
     }
 
     fn input(&mut self, event: &WindowEvent) -> bool {
-        match *event {
+        let camera_res = self.camera_controller.process_events(event);
+
+        let res = match *event {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
                 true
@@ -501,10 +507,13 @@ impl State {
                 }
 
                 true
-            }
+            },
 
             _ => false,
-        }
+        };
+
+        // This isn't a great way of doing it but i dunno
+        res || camera_res
     }
 
     fn update(&mut self) {
@@ -521,6 +530,10 @@ impl State {
                 self.clear_colour = colour;
             }
         }
+
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera_uniform.update_view_projection(&self.camera);
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
     }
 
     fn render(&mut self) -> Result<(), SurfaceError> {
