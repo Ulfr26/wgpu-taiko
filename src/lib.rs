@@ -1,12 +1,13 @@
+use cgmath::{Vector3, Quaternion, Rotation3, Deg, Zero, InnerSpace};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
-    vertex_attr_array, BlendState, Buffer, BufferAddress, BufferUsages, Color, ColorTargetState,
-    ColorWrites, CommandEncoderDescriptor, Device, Face, FragmentState, FrontFace, IndexFormat,
-    Instance, InstanceDescriptor, MultisampleState, PipelineLayoutDescriptor, PolygonMode,
-    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, Surface,
-    SurfaceConfiguration, SurfaceError, VertexAttribute, VertexBufferLayout, VertexState,
-    VertexStepMode, BindGroupLayoutDescriptor, BindGroupDescriptor, BindGroup,
+    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, BlendState,
+    Buffer, BufferAddress, BufferUsages, Color, ColorTargetState, ColorWrites,
+    CommandEncoderDescriptor, Device, Face, FragmentState, FrontFace, IndexFormat,
+    InstanceDescriptor, MultisampleState, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
+    PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError,
+    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -15,15 +16,15 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+use camera::{Camera, CameraController};
 use std::{f64::consts::PI, mem::size_of};
 use util::color_from_hsva;
-use camera::{Camera, CameraController};
 
 use crate::camera::CameraUniform;
 
+mod camera;
 mod texture;
 mod util;
-mod camera;
 
 const CLEAR_COLOUR: Color = Color {
     r: 0.1,
@@ -33,6 +34,41 @@ const CLEAR_COLOUR: Color = Color {
 };
 
 const CAMERA_SPEED: f32 = 0.2;
+const INSTANCES_PER_ROW: u32 = 10;
+const INSTANCE_DISPLACEMENT: Vector3<f32> = Vector3::new(
+    INSTANCES_PER_ROW as f32 * 0.5,
+    0.0,
+    INSTANCES_PER_ROW as f32 * 0.5,
+);
+
+const VERTICES: &[Vertex] = &[
+    // Changed
+    Vertex {
+        position: [-0.0868241, 0.49240386, 0.0],
+        tex_coords: [0.4131759, 0.00759614],
+    }, // A
+    Vertex {
+        position: [-0.49513406, 0.06958647, 0.0],
+        tex_coords: [0.0048659444, 0.43041354],
+    }, // B
+    Vertex {
+        position: [-0.21918549, -0.44939706, 0.0],
+        tex_coords: [0.28081453, 0.949397],
+    }, // C
+    Vertex {
+        position: [0.35966998, -0.3473291, 0.0],
+        tex_coords: [0.85967, 0.84732914],
+    }, // D
+    Vertex {
+        position: [0.44147372, 0.2347359, 0.0],
+        tex_coords: [0.9414737, 0.2652641],
+    }, // E
+];
+
+const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
+
+const WIDTH: u32 = 1280;
+const HEIGHT: u32 = 720;
 
 struct State {
     surface: Surface,
@@ -52,6 +88,8 @@ struct State {
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
     num_indices: u32,
+    instances: Vec<Instance>,
+    instance_buffer: Buffer,
 
     // Surface challenge
     clear_colour: Color,
@@ -70,6 +108,38 @@ struct State {
 struct Vertex {
     position: [f32; 3],
     tex_coords: [f32; 2],
+}
+
+struct Instance {
+    position: cgmath::Vector3<f32>,
+    rotation: cgmath::Quaternion<f32>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    matrix: [[f32; 4]; 4],
+}
+
+impl Instance {
+    // A mat4x4 is really just 4 vec4's. So we need these 4 vectors.
+    const ATTRS: [VertexAttribute; 4] = vertex_attr_array![5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4];
+
+    fn to_raw(&self) -> InstanceRaw {
+        InstanceRaw {
+            matrix: (cgmath::Matrix4::from_translation(self.position)
+                * cgmath::Matrix4::from(self.rotation))
+            .into(),
+        }
+    }
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        VertexBufferLayout { 
+            array_stride: size_of::<InstanceRaw>() as BufferAddress, 
+            step_mode: VertexStepMode::Instance, 
+            attributes: &Self::ATTRS,
+        }
+    }
 }
 
 impl Vertex {
@@ -99,34 +169,26 @@ impl Vertex {
     }
 }
 
-const VERTICES: &[Vertex] = &[
-    // Changed
-    Vertex {
-        position: [-0.0868241, 0.49240386, 0.0],
-        tex_coords: [0.4131759, 0.00759614],
-    }, // A
-    Vertex {
-        position: [-0.49513406, 0.06958647, 0.0],
-        tex_coords: [0.0048659444, 0.43041354],
-    }, // B
-    Vertex {
-        position: [-0.21918549, -0.44939706, 0.0],
-        tex_coords: [0.28081453, 0.949397],
-    }, // C
-    Vertex {
-        position: [0.35966998, -0.3473291, 0.0],
-        tex_coords: [0.85967, 0.84732914],
-    }, // D
-    Vertex {
-        position: [0.44147372, 0.2347359, 0.0],
-        tex_coords: [0.9414737, 0.2652641],
-    }, // E
-];
 
-const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
+fn create_instances() -> Vec<Instance> {
+    (0..INSTANCES_PER_ROW).flat_map(|z|
+        (0..INSTANCES_PER_ROW).map(move |x| {
+            let position = Vector3::new(x as f32, 0.0, z as f32) - INSTANCE_DISPLACEMENT;
 
-const WIDTH: u32 = 800;
-const HEIGHT: u32 = 600;
+            let rotation = if position.is_zero() { 
+                Quaternion::from_axis_angle(Vector3::unit_z(), Deg(45.0))
+            } else {
+                // put the following line in for an odd bug
+                //Quaternion::from_axis_angle(position, Deg(45.0))
+                Quaternion::from_axis_angle(position.normalize(), Deg(45.0))
+            };
+
+            Instance {
+                position,
+                rotation,
+            }
+        })).collect::<Vec<_>>()
+}
 
 pub async fn run() {
     // To build a window with winit, we need to build an event loop first
@@ -195,7 +257,7 @@ impl State {
 
         // The instance is a handle to our GPU
         // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
-        let instance = Instance::new(InstanceDescriptor {
+        let instance = wgpu::Instance::new(InstanceDescriptor {
             backends: wgpu::Backends::all(),
             dx12_shader_compiler: Default::default(),
         });
@@ -352,21 +414,20 @@ impl State {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
 
-        let camera_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer { 
-                        ty: wgpu::BufferBindingType::Uniform, 
-                        has_dynamic_offset: false, 
-                        min_binding_size: None, 
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
-                }
-            ],
-            label: Some("camera_bind_group_layout"),
-        });
+                }],
+                label: Some("camera_bind_group_layout"),
+            });
 
         let camera_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("camera_bind_group"),
@@ -374,12 +435,12 @@ impl State {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
-            }]
+            }],
         });
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader4.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("instances_shader.wgsl").into()),
         });
 
         let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -394,7 +455,7 @@ impl State {
             vertex: VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), Instance::desc()],
             },
 
             fragment: Some(FragmentState {
@@ -440,6 +501,16 @@ impl State {
             usage: BufferUsages::INDEX,
         });
 
+        let instances = create_instances();
+        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+
+        // For some reason, the instance buffer needs to be a vertex buffer.
+        let instance_buffer = device.create_buffer_init(&BufferInitDescriptor { 
+            label: Some("Instance Buffer"), 
+            contents: bytemuck::cast_slice(&instance_data), 
+            usage: BufferUsages::VERTEX,
+        });
+
         Self {
             window,
             surface,
@@ -457,6 +528,8 @@ impl State {
             camera_uniform,
             camera_bind_group,
             camera_buffer,
+            instances,
+            instance_buffer,
 
             num_indices: INDICES.len() as u32,
             clear_colour: CLEAR_COLOUR,
@@ -503,11 +576,11 @@ impl State {
                 match key {
                     VirtualKeyCode::Tab => self.changing_clear_colour = !self.changing_clear_colour,
                     VirtualKeyCode::Space => self.freud = !self.freud,
-                    _ => {},
+                    _ => {}
                 }
 
                 true
-            },
+            }
 
             _ => false,
         };
@@ -533,7 +606,11 @@ impl State {
 
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_projection(&self.camera);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
     }
 
     fn render(&mut self) -> Result<(), SurfaceError> {
@@ -573,8 +650,9 @@ impl State {
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
 
         drop(render_pass);
 

@@ -1,5 +1,5 @@
-use cgmath::{Point3, Matrix4, Deg, Vector3, SquareMatrix};
-use winit::event::{WindowEvent, KeyboardInput, VirtualKeyCode, ElementState};
+use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3};
+use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 
 pub struct Camera {
     pub eye: Point3<f32>,
@@ -18,10 +18,7 @@ pub struct CameraUniform {
 }
 
 const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::new(
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 0.5, 0.0,
-    0.0, 0.0, 0.5, 1.0
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 1.0,
 );
 
 impl Camera {
@@ -35,7 +32,9 @@ impl Camera {
 
 impl CameraUniform {
     pub fn new() -> Self {
-        CameraUniform { view_projection: Matrix4::identity().into() }
+        CameraUniform {
+            view_projection: Matrix4::identity().into(),
+        }
     }
 
     pub fn update_view_projection(&mut self, camera: &Camera) {
@@ -65,11 +64,12 @@ impl CameraController {
     pub fn process_events(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput {
-                input: KeyboardInput {
-                    state,
-                    virtual_keycode: Some(keycode),
-                    ..
-                },
+                input:
+                    KeyboardInput {
+                        state,
+                        virtual_keycode: Some(keycode),
+                        ..
+                    },
                 ..
             } => {
                 let is_pressed = *state == ElementState::Pressed;
@@ -119,8 +119,8 @@ impl CameraController {
         let forward_mag = forward.magnitude();
 
         if self.is_right_pressed {
-            // Rescale the distance between the target and eye so 
-            // that it doesn't change. The eye therefore still 
+            // Rescale the distance between the target and eye so
+            // that it doesn't change. The eye therefore still
             // lies on the circle made by the target and eye.
             camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
         }
