@@ -3,11 +3,11 @@ use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, BlendState,
     Buffer, BufferAddress, BufferUsages, Color, ColorTargetState, ColorWrites,
-    CommandEncoderDescriptor, Device, Face, FragmentState, FrontFace, IndexFormat,
+    CommandEncoderDescriptor, Device, DepthStencilState, Face, FragmentState, FrontFace, IndexFormat,
     InstanceDescriptor, MultisampleState, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
     PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
     RenderPipelineDescriptor, ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError,
-    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode,
+    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode, TextureUsages,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -82,6 +82,7 @@ struct State {
     index_buffer: Buffer,
     diffuse_bind_group: BindGroup,
     diffuse_texture: texture::Texture,
+    depth_texture: texture::Texture,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -472,13 +473,20 @@ impl State {
                 topology: PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: FrontFace::Ccw,
-                cull_mode: Some(Face::Back),
+                //cull_mode: Some(Face::Back), // enable when rendering 3d models
+                cull_mode: None,
                 polygon_mode: PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
             },
 
-            depth_stencil: None,
+            depth_stencil: Some(DepthStencilState {
+                format: texture::Texture::DEPTH_TEXTURE_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
 
             multisample: MultisampleState {
                 count: 1,
@@ -511,6 +519,8 @@ impl State {
             usage: BufferUsages::VERTEX,
         });
 
+        let depth_texture = texture::Texture::depth_texture(&device, &config, "depth_texture");
+
         Self {
             window,
             surface,
@@ -523,6 +533,7 @@ impl State {
             index_buffer,
             diffuse_bind_group,
             diffuse_texture,
+            depth_texture,
             camera,
             camera_controller,
             camera_uniform,
@@ -552,6 +563,7 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.depth_texture = texture::Texture::depth_texture(&self.device, &self.config, "depth_texture");
         }
     }
 
@@ -637,7 +649,14 @@ impl State {
                     store: true,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
         });
 
         render_pass.set_pipeline(&self.render_pipeline);
