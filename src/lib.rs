@@ -3,11 +3,11 @@ use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, BlendState,
     Buffer, BufferAddress, BufferUsages, Color, ColorTargetState, ColorWrites,
-    CommandEncoderDescriptor, Device, DepthStencilState, Face, FragmentState, FrontFace, IndexFormat,
+    CommandEncoderDescriptor, Device, DepthStencilState, FragmentState, FrontFace, IndexFormat,
     InstanceDescriptor, MultisampleState, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
     PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
     RenderPipelineDescriptor, ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError,
-    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode, TextureUsages,
+    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode, BindGroupLayoutEntry, BindGroupLayout,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -65,6 +65,27 @@ const VERTICES: &[Vertex] = &[
     }, // E
 ];
 
+const SCREEN: &[Vertex] = &[
+    Vertex {
+        position: [-1.0, 0.0, 0.0],
+        tex_coords: [0.0, 1.0],
+    },
+    Vertex {
+        position: [0.0, 0.0, 0.0],
+        tex_coords: [1.0, 1.0],
+    },
+    Vertex {
+        position: [-1.0, 1.0, 0.0],
+        tex_coords: [0.0, 0.0],
+    },
+    Vertex {
+        position: [0.0, 1.0, 0.0],
+        tex_coords: [1.0, 0.0],
+    },
+];
+
+const SCREEN_INDICES: &[u16] = &[0, 1, 2, 1, 3, 2];
+
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
 
 const WIDTH: u32 = 1280;
@@ -83,6 +104,11 @@ struct State {
     diffuse_bind_group: BindGroup,
     diffuse_texture: texture::Texture,
     depth_texture: texture::Texture,
+    depth_bind_group_layout: BindGroupLayout,
+    depth_bind_group: BindGroup,
+    depth_vertex_buffer: Buffer,
+    depth_index_buffer: Buffer,
+    depth_render_pipeline: RenderPipeline,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -439,9 +465,9 @@ impl State {
             }],
         });
 
-        let shader = device.create_shader_module(ShaderModuleDescriptor {
+        let d3_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("instances_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/instances_shader.wgsl").into()),
         });
 
         let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -454,13 +480,13 @@ impl State {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: VertexState {
-                module: &shader,
+                module: &d3_shader,
                 entry_point: "vs_main",
                 buffers: &[Vertex::desc(), Instance::desc()],
             },
 
             fragment: Some(FragmentState {
-                module: &shader,
+                module: &d3_shader,
                 entry_point: "fs_main",
                 targets: &[Some(ColorTargetState {
                     format: config.format,
@@ -521,6 +547,107 @@ impl State {
 
         let depth_texture = texture::Texture::depth_texture(&device, &config, "depth_texture");
 
+        // We need a new bind group layout for the depth texture because it needs a comparison sampler
+        // whatever that is
+        let depth_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor { 
+            label: Some("depth_bind_group_layout"), 
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { 
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2, 
+                    multisampled: false,
+                },
+                count: None,
+            },
+
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            }]
+        });
+
+        let depth_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth_bind_group"),
+            layout: &depth_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&depth_texture.view),
+            },
+            
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&depth_texture.sampler),
+            }],
+        });
+
+        let d2_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("2d shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth_texture_shader.wgsl").into()),
+        });
+
+        let depth_render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Depth Render Pipeline Layout"),
+            bind_group_layouts: &[&depth_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let depth_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Depth Render Pipeline"),
+            layout: Some(&depth_render_pipeline_layout),
+            vertex: VertexState {
+                module: &d2_shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+
+            fragment: Some(FragmentState {
+                module: &d2_shader,
+                entry_point: "fs_main",
+                targets: &[Some(ColorTargetState {
+                    format: config.format,
+                    blend: Some(BlendState::REPLACE),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                //cull_mode: Some(Face::Back), // enable when rendering 3d models
+                cull_mode: None,
+                polygon_mode: PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+
+            depth_stencil: None,
+
+            multisample: MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+
+            multiview: None,
+        });
+
+        let depth_vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Depth vertex buffer"),
+            contents: bytemuck::cast_slice(SCREEN),
+            usage: BufferUsages::VERTEX,
+        });
+
+        let depth_index_buffer = device.create_buffer_init(&BufferInitDescriptor { 
+            label: Some("Depth index buffer"), 
+            contents: bytemuck::cast_slice(SCREEN_INDICES), 
+            usage: BufferUsages::INDEX,
+        });
+
         Self {
             window,
             surface,
@@ -534,6 +661,11 @@ impl State {
             diffuse_bind_group,
             diffuse_texture,
             depth_texture,
+            depth_bind_group,
+            depth_bind_group_layout,
+            depth_vertex_buffer,
+            depth_index_buffer,
+            depth_render_pipeline,
             camera,
             camera_controller,
             camera_uniform,
@@ -564,6 +696,20 @@ impl State {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
             self.depth_texture = texture::Texture::depth_texture(&self.device, &self.config, "depth_texture");
+            self.depth_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &self.depth_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.depth_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.depth_texture.sampler),
+                    },
+                ],
+                label: Some("depth_pass.bind_group"),
+            });
         }
     }
 
@@ -666,12 +812,41 @@ impl State {
             &self.diffuse_bind_group
         };
 
+        // diffuse texture
         render_pass.set_bind_group(0, bind_group, &[]);
+        // camera
         render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+        // vertices
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        // instances
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        // indices
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        // draw!
         render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+
+        drop(render_pass);
+
+        // Now for the depth texture
+        let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("Depth Render Pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: true,
+                },
+            })],
+            depth_stencil_attachment: None,
+        });
+
+        render_pass.set_pipeline(&self.depth_render_pipeline);
+
+        render_pass.set_bind_group(0, &self.depth_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.depth_vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.depth_index_buffer.slice(..), IndexFormat::Uint16);
+        render_pass.draw_indexed(0..SCREEN_INDICES.len() as _, 0, 0..1);
 
         drop(render_pass);
 
