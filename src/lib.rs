@@ -1,13 +1,15 @@
-use cgmath::{Vector3, Quaternion, Rotation3, Deg, Zero, InnerSpace};
+use cgmath::{Deg, InnerSpace, Quaternion, Rotation3, Vector3, Zero};
+use model::DrawModel;
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
-    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, BlendState,
-    Buffer, BufferAddress, BufferUsages, Color, ColorTargetState, ColorWrites,
-    CommandEncoderDescriptor, Device, DepthStencilState, FragmentState, FrontFace, IndexFormat,
-    InstanceDescriptor, MultisampleState, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
-    PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, ShaderModuleDescriptor, Surface, SurfaceConfiguration, SurfaceError,
-    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode, BindGroupLayoutEntry, BindGroupLayout,
+    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BlendState, Buffer, BufferAddress, BufferUsages, Color, ColorTargetState,
+    ColorWrites, CommandEncoderDescriptor, DepthStencilState, Device, FragmentState, FrontFace,
+    IndexFormat, InstanceDescriptor, MultisampleState, PipelineLayoutDescriptor, PolygonMode,
+    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, Surface,
+    SurfaceConfiguration, SurfaceError, VertexAttribute, VertexBufferLayout, VertexState,
+    VertexStepMode,
 };
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -20,9 +22,11 @@ use camera::{Camera, CameraController};
 use std::{f64::consts::PI, mem::size_of};
 use util::color_from_hsva;
 
-use crate::camera::CameraUniform;
+use crate::{camera::CameraUniform, model::Vertex};
 
 mod camera;
+mod model;
+mod resources;
 mod texture;
 mod util;
 
@@ -41,52 +45,28 @@ const INSTANCE_DISPLACEMENT: Vector3<f32> = Vector3::new(
     INSTANCES_PER_ROW as f32 * 0.5,
 );
 
-const VERTICES: &[Vertex] = &[
-    // Changed
-    Vertex {
-        position: [-0.0868241, 0.49240386, 0.0],
-        tex_coords: [0.4131759, 0.00759614],
-    }, // A
-    Vertex {
-        position: [-0.49513406, 0.06958647, 0.0],
-        tex_coords: [0.0048659444, 0.43041354],
-    }, // B
-    Vertex {
-        position: [-0.21918549, -0.44939706, 0.0],
-        tex_coords: [0.28081453, 0.949397],
-    }, // C
-    Vertex {
-        position: [0.35966998, -0.3473291, 0.0],
-        tex_coords: [0.85967, 0.84732914],
-    }, // D
-    Vertex {
-        position: [0.44147372, 0.2347359, 0.0],
-        tex_coords: [0.9414737, 0.2652641],
-    }, // E
-];
+const SPACE_BETWEEN_INSTANCES: f32 = 5.0;
 
-const SCREEN: &[Vertex] = &[
-    Vertex {
+const SCREEN: &[SimpleVertex] = &[
+    SimpleVertex {
         position: [-1.0, 0.0, 0.0],
         tex_coords: [0.0, 1.0],
     },
-    Vertex {
+    SimpleVertex {
         position: [0.0, 0.0, 0.0],
         tex_coords: [1.0, 1.0],
     },
-    Vertex {
+    SimpleVertex {
         position: [-1.0, 1.0, 0.0],
         tex_coords: [0.0, 0.0],
     },
-    Vertex {
+    SimpleVertex {
         position: [0.0, 1.0, 0.0],
         tex_coords: [1.0, 0.0],
     },
 ];
 
 const SCREEN_INDICES: &[u16] = &[0, 1, 2, 1, 3, 2];
-
-const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -99,8 +79,6 @@ struct State {
     size: PhysicalSize<u32>,
     window: Window,
     render_pipeline: RenderPipeline,
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
     diffuse_bind_group: BindGroup,
     diffuse_texture: texture::Texture,
     depth_texture: texture::Texture,
@@ -114,9 +92,9 @@ struct State {
     camera_uniform: CameraUniform,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
-    num_indices: u32,
     instances: Vec<Instance>,
     instance_buffer: Buffer,
+    obj_model: model::Model,
 
     // Surface challenge
     clear_colour: Color,
@@ -132,7 +110,7 @@ struct State {
 // Struct that represents the vertices of objects in our scene
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+struct SimpleVertex {
     position: [f32; 3],
     tex_coords: [f32; 2],
 }
@@ -150,7 +128,8 @@ struct InstanceRaw {
 
 impl Instance {
     // A mat4x4 is really just 4 vec4's. So we need these 4 vectors.
-    const ATTRS: [VertexAttribute; 4] = vertex_attr_array![5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4];
+    const ATTRS: [VertexAttribute; 4] =
+        vertex_attr_array![5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4];
 
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
@@ -161,20 +140,20 @@ impl Instance {
     }
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        VertexBufferLayout { 
-            array_stride: size_of::<InstanceRaw>() as BufferAddress, 
-            step_mode: VertexStepMode::Instance, 
+        VertexBufferLayout {
+            array_stride: size_of::<InstanceRaw>() as BufferAddress,
+            step_mode: VertexStepMode::Instance,
             attributes: &Self::ATTRS,
         }
     }
 }
 
-impl Vertex {
+impl SimpleVertex {
     const ATTRS: [VertexAttribute; 2] = vertex_attr_array![0 => Float32x3, 1 => Float32x2];
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         VertexBufferLayout {
-            array_stride: size_of::<Vertex>() as BufferAddress,
+            array_stride: size_of::<SimpleVertex>() as BufferAddress,
             step_mode: VertexStepMode::Vertex,
             /*
             attributes: &[
@@ -196,25 +175,24 @@ impl Vertex {
     }
 }
 
-
 fn create_instances() -> Vec<Instance> {
-    (0..INSTANCES_PER_ROW).flat_map(|z|
-        (0..INSTANCES_PER_ROW).map(move |x| {
-            let position = Vector3::new(x as f32, 0.0, z as f32) - INSTANCE_DISPLACEMENT;
+    (0..INSTANCES_PER_ROW)
+        .flat_map(|z| {
+            (0..INSTANCES_PER_ROW).map(move |x| {
+                let position = SPACE_BETWEEN_INSTANCES * (Vector3::new(x as f32, 0.0, z as f32) - INSTANCE_DISPLACEMENT);
 
-            let rotation = if position.is_zero() { 
-                Quaternion::from_axis_angle(Vector3::unit_z(), Deg(45.0))
-            } else {
-                // put the following line in for an odd bug
-                //Quaternion::from_axis_angle(position, Deg(45.0))
-                Quaternion::from_axis_angle(position.normalize(), Deg(45.0))
-            };
+                let rotation = if position.is_zero() {
+                    Quaternion::from_axis_angle(Vector3::unit_z(), Deg(45.0))
+                } else {
+                    // put the following line in for an odd bug
+                    //Quaternion::from_axis_angle(position, Deg(45.0))
+                    Quaternion::from_axis_angle(position.normalize(), Deg(45.0))
+                };
 
-            Instance {
-                position,
-                rotation,
-            }
-        })).collect::<Vec<_>>()
+                Instance { position, rotation }
+            })
+        })
+        .collect::<Vec<_>>()
 }
 
 pub async fn run() {
@@ -482,7 +460,7 @@ impl State {
             vertex: VertexState {
                 module: &d3_shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc(), Instance::desc()],
+                buffers: &[model::ModelVertex::desc(), Instance::desc()],
             },
 
             fragment: Some(FragmentState {
@@ -499,8 +477,8 @@ impl State {
                 topology: PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: FrontFace::Ccw,
-                //cull_mode: Some(Face::Back), // enable when rendering 3d models
-                cull_mode: None,
+                cull_mode: Some(wgpu::Face::Back), // enable when rendering 3d models
+                //cull_mode: None,
                 polygon_mode: PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -523,25 +501,13 @@ impl State {
             multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: BufferUsages::INDEX,
-        });
-
         let instances = create_instances();
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
 
         // For some reason, the instance buffer needs to be a vertex buffer.
-        let instance_buffer = device.create_buffer_init(&BufferInitDescriptor { 
-            label: Some("Instance Buffer"), 
-            contents: bytemuck::cast_slice(&instance_data), 
+        let instance_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&instance_data),
             usage: BufferUsages::VERTEX,
         });
 
@@ -549,51 +515,56 @@ impl State {
 
         // We need a new bind group layout for the depth texture because it needs a comparison sampler
         // whatever that is
-        let depth_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor { 
-            label: Some("depth_bind_group_layout"), 
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture { 
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2, 
-                    multisampled: false,
+        let depth_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("depth_bind_group_layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            },
-
-            BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                count: None,
-            }]
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
         });
 
         let depth_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("depth_bind_group"),
             layout: &depth_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&depth_texture.view),
-            },
-            
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&depth_texture.sampler),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&depth_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&depth_texture.sampler),
+                },
+            ],
         });
 
         let d2_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("2d shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth_texture_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/depth_texture_shader.wgsl").into(),
+            ),
         });
 
-        let depth_render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Depth Render Pipeline Layout"),
-            bind_group_layouts: &[&depth_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let depth_render_pipeline_layout =
+            device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Depth Render Pipeline Layout"),
+                bind_group_layouts: &[&depth_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let depth_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Depth Render Pipeline"),
@@ -601,7 +572,7 @@ impl State {
             vertex: VertexState {
                 module: &d2_shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                buffers: &[SimpleVertex::desc()],
             },
 
             fragment: Some(FragmentState {
@@ -642,11 +613,18 @@ impl State {
             usage: BufferUsages::VERTEX,
         });
 
-        let depth_index_buffer = device.create_buffer_init(&BufferInitDescriptor { 
-            label: Some("Depth index buffer"), 
-            contents: bytemuck::cast_slice(SCREEN_INDICES), 
+        let depth_index_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Depth index buffer"),
+            contents: bytemuck::cast_slice(SCREEN_INDICES),
             usage: BufferUsages::INDEX,
         });
+
+        let obj_model = resources::load_model(
+            "./assets/rei/rei.obj",
+            &device,
+            &queue,
+            &texture_bind_group_layout,
+        ).unwrap();
 
         Self {
             window,
@@ -656,8 +634,6 @@ impl State {
             config,
             size,
             render_pipeline,
-            vertex_buffer,
-            index_buffer,
             diffuse_bind_group,
             diffuse_texture,
             depth_texture,
@@ -673,8 +649,8 @@ impl State {
             camera_buffer,
             instances,
             instance_buffer,
+            obj_model,
 
-            num_indices: INDICES.len() as u32,
             clear_colour: CLEAR_COLOUR,
             changing_clear_colour: false,
             cursor_position: None,
@@ -695,7 +671,8 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            self.depth_texture = texture::Texture::depth_texture(&self.device, &self.config, "depth_texture");
+            self.depth_texture =
+                texture::Texture::depth_texture(&self.device, &self.config, "depth_texture");
             self.depth_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 layout: &self.depth_bind_group_layout,
                 entries: &[
@@ -816,17 +793,17 @@ impl State {
         render_pass.set_bind_group(0, bind_group, &[]);
         // camera
         render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-        // vertices
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         // instances
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        // indices
-        render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        // draw!
-        render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+        
+        // draw the models :D
+        for mesh in self.obj_model.meshes.iter() {
+            render_pass.draw_mesh_instanced(mesh, &self.obj_model.materials[mesh.material], 0..self.instances.len() as u32, &self.camera_bind_group);
+        }
 
         drop(render_pass);
 
+        /*
         // Now for the depth texture
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Depth Render Pass"),
@@ -849,6 +826,7 @@ impl State {
         render_pass.draw_indexed(0..SCREEN_INDICES.len() as _, 0, 0..1);
 
         drop(render_pass);
+        */
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

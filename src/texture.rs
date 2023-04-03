@@ -1,5 +1,5 @@
 use anyhow::*;
-use image::{GenericImageView, imageops::FilterType::Nearest};
+use image::{imageops::FilterType::Nearest, GenericImageView};
 use wgpu::TextureDimension;
 
 // TODO: Builder pattern?
@@ -114,8 +114,7 @@ impl Texture {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: Self::DEPTH_TEXTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                |  wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
@@ -134,6 +133,10 @@ impl Texture {
             ..Default::default()
         });
 
-        Self { texture, view, sampler }
+        Self {
+            texture,
+            view,
+            sampler,
+        }
     }
 }
